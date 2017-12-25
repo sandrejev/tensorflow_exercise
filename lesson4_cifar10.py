@@ -78,32 +78,12 @@ def bias(shape, name="b"):
     initial = tf.constant(0.1, shape=shape)
     return tf.Variable(initial, name=name)
 
-# TODO: z-score
-# mean = np.mean(x_train,axis=(0,1,2,3))
-# std = np.std(x_train,axis=(0,1,2,3))
-# x_train = (x_train-mean)/(std+1e-7)
-# x_test = (x_test-mean)/(std+1e-7)
-
 cifar_data = pickle.load(open("CIFAR_data/cifar.pcl", "rb"))
-# print(cifar_data['train']['x'][0, 0:9, 0:9, 0:3])
-# train_images = cifar_data['train']['x'] / 255.
-# train_images = np.cast(train_images * 255., np.uint8)
-# print(train_images[0, 0:9, 0:9, 0:3])
 train_labels = cifar_data['train']['y']
 train_images = cifar_data['train']['x'] / 255.0
-#train_images = (train_images - np.mean(train_images, axis=0)) / np.std(train_images, axis=0)
-
-print(train_images.shape)
-print(train_labels.shape)
 train_images, train_labels = augment_data(train_images, train_labels, augementation_factor=1, use_random_rotation=True, use_random_shear=True, use_random_shift=True, use_random_zoom=True)
-# train_images = np.stack((train_images, train_images_a), axis=0)
-# train_labels = np.stack((train_labels, train_labels_a), axis=0)
-print(train_images.shape)
-print(train_labels.shape)
-
 
 test_images = cifar_data['test']['x'] / 255.0
-#test_images = (test_images - np.mean(test_images, axis=0)) / np.std(test_images, axis=0)
 test_labels = cifar_data['test']['y']
 labels = cifar_data['labels']
 
@@ -121,7 +101,6 @@ with tf.name_scope("conv1"):
     b_conv1 = bias([dim(W_conv1, 3)])
     h_conv1 = tf.nn.relu(tf.nn.conv2d(x, W_conv1, strides=[1, 1, 1, 1], padding='SAME') + b_conv1)
     tf.summary.histogram('histogram', b_conv1)
-    #tf.summary.histogram('sparsity', tf.nn.zero_fraction(W_conv1))
     # [?, 384]
     # [?, 32, 32, 64]
 
@@ -133,8 +112,6 @@ with tf.name_scope("conv2"):
     W_conv2 = weights([5, 5, dim(h_pool1, 3), 64])
     b_conv2 = bias([dim(W_conv2, 3)])
     h_conv2 = tf.nn.relu(tf.nn.conv2d(h_pool1, W_conv2, strides=[1, 1, 1, 1], padding='SAME') + b_conv2)
-    tf.summary.histogram('histogram', b_conv2)
-    #tf.summary.histogram('sparsity', tf.nn.zero_fraction(W_conv2))
     # [?, 16, 16, 64]
 
 with tf.name_scope("pool2"):
@@ -150,8 +127,6 @@ with tf.name_scope('fc1'):
     b_fc1 = bias([dim(W_fc1, 1)])
 
     h_fc1 = tf.nn.relu(tf.matmul(h_pool_flat, W_fc1) + b_fc1)
-    # tf.summary.histogram('histogram', h_fc1)
-    # tf.summary.histogram('sparsity', tf.nn.zero_fraction(h_fc1))
     # [?, 384]
 
 with tf.name_scope('dropout'):
@@ -163,8 +138,6 @@ with tf.name_scope('fc2'):
     b_fc2 = bias([dim(W_fc2, 1)])
 
     h_fc2 = tf.nn.relu(tf.matmul(h_fc1_drop, W_fc2) + b_fc2)
-    # tf.summary.histogram('histogram', h_fc2)
-    # tf.summary.histogram('sparsity', tf.nn.zero_fraction(h_fc2))
     # [?, 192]
 
 with tf.name_scope('softmax1_debug'):
@@ -245,30 +218,3 @@ with tf.Session(config=tf.ConfigProto(log_device_placement=False, allow_soft_pla
     accuracy = sess.run(h_accuracy, feed_dict={x: test_images, y_: test_labels, keep_prob: 1.0})
     print("Final accuracy: {}".format(accuracy))
 
-
-labels = pickle.load(open("CIFAR_data/batches.meta", 'rb'), encoding='latin1')['label_names']
-
-
-
-# train_batches = []
-# for i in range(5):
-#     with open("CIFAR_data/data_batch_{}".format(i+1), 'rb') as fo:
-#          train_batches.append(pickle.load(fo, encoding='latin1'))
-# train_features = np.moveaxis(np.concatenate([batch['data'].reshape(-1, 3, 32, 32) for batch in train_batches]), 1, 3)
-# train_labels_class = np.concatenate([np.array(batch['labels'], dtype=np.uint8) for batch in train_batches]).flatten()
-# train_labels = np.zeros((len(train_labels_class), len(labels)))
-# train_labels[np.arange(len(train_labels_class)), train_labels_class] = 1
-#
-# test_batches = []
-# with open("CIFAR_data/test_batch", 'rb') as fo:
-#     test_batches.append(pickle.load(fo, encoding='latin1'))
-# test_features = np.moveaxis(np.concatenate([batch['data'].reshape(-1, 3, 32, 32) for batch in test_batches]), 1, 3)
-# test_labels_class = np.concatenate([np.array(batch['labels'], dtype=np.uint8) for batch in test_batches]).flatten()
-# test_labels = np.zeros((len(test_labels_class), len(labels)))
-# test_labels[np.arange(len(test_labels_class)), test_labels_class] = 1
-#
-# for i in sample(range(len(test_labels)), 5):
-#     show(test_features[i], labels[np.argmax(test_labels[i])])
-#
-# cifar_data = {'train': {'y':train_labels, 'x': train_features}, 'test': {'y':test_labels, 'x': test_features}, 'labels': labels}
-# pickle.dump(cifar_data, open("CIFAR_data/cifar.pcl", "bw"))
