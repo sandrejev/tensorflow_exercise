@@ -25,6 +25,7 @@ y_test = keras.utils.to_categorical(y_test, num_classes)
 ##############################
 model = models.Sequential()
 for cnn_depth in range(1, 3):
+    # TODO input_shape is needed?
     model.add(layers.Conv2D(32*cnn_depth, kernel_size=(3, 3), strides=(1, 1), activation='relu', input_shape=input_shape, kernel_regularizer=regularizers.l2(l2_weights)))
     model.add(layers.Activation("relu"))
     model.add(layers.BatchNormalization())
@@ -39,7 +40,6 @@ model.add(layers.Dense(256, activation='relu'))
 model.add(layers.Dense(128, activation='relu'))
 model.add(layers.Dense(num_classes, activation='softmax'))
 
-#opt = optimizers.RMSprop(lr=0.0005,decay=1e-6)
 model.compile(loss=keras.losses.categorical_crossentropy,
               optimizer=optimizers.Adam(),
               metrics=['accuracy'])
