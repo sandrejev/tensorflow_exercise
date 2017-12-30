@@ -1,33 +1,21 @@
 from __future__ import print_function
-from tensorflow import keras
 from tensorflow.python.keras import layers, models, datasets, callbacks, preprocessing, optimizers, applications
 from tensorflow.python.keras.layers import Conv2D, MaxPool2D, BatchNormalization, LeakyReLU, Input, Reshape
 from datetime import datetime
 from keras.regularizers import l2
 from os.path import basename
 import re
+import cv2
 import xml.etree.ElementTree as etree
 from utils import *
-import itertools
-from numpy.random import uniform
 
-from tensorflow.python import debug as tf_debug
-#
-# sess = tf.Session()
-# sess = tf_debug.LocalCLIDebugWrapperSession(sess, dump_root="/tmp/debug/")
-# sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
-# keras.backend.set_session(sess)
-
-#
-# TODO here we should pass original shape and resized
-#
 def voc2012_get_annotation(self, path):
-    img = Image.open(path)
-    size_scaler = tuple(s[1] / float(s[0]) for s in zip(img.size, self.target_size))
-    img = img.resize(self.target_size)
-    img = np.asarray(img) / 255.
+    img = cv2.imread(path)[..., [2, 1, 0]].copy()
+    img_scaler = tuple(s[1] / float(s[0]) for s in zip(img.size, self.target_size))
+    img = cv2.resize(img, dsize=self.target_size)
+    img = img / 255.
 
-    y = np.zeros(self.grid_shape + (self.anchors_size*5 + len(self.classes),), dtype=K.floatx())
+    y = np.zeros(self.grid_shape + (self.anchors_size*5 + len(self.classes),), dtype=np.float)
     y_grid = np.zeros(self.grid_shape, dtype=np.int) # Count
 
     features_path = "VOCdevkit/VOC2012/Annotations/" + re.sub(".jpg", ".xml", basename(path))
@@ -37,7 +25,7 @@ def voc2012_get_annotation(self, path):
 
         # Read information about bounding box and rescale it to target size
         xmax, xmin, ymax, ymin = [float(el.text) for el in sorted(node.findall("./bndbox/*"), key=lambda el: el.tag)]
-        bb = BBox.from_corners(xmin*size_scaler[0], xmax*size_scaler[0], ymin*size_scaler[1], ymax*size_scaler[1])
+        bb = BBox.from_corners(xmin*img_scaler[1], xmax*img_scaler[1], ymin*img_scaler[0], ymax*img_scaler[0])
         bb_cell, bb_rel = bb.grid_position(self.target_size, self.grid_shape)
 
         # Check whether this grid cell is already full
