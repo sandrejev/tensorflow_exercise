@@ -1,107 +1,191 @@
 from __future__ import print_function
-from tensorflow.python.keras import layers, models, datasets, callbacks, preprocessing, optimizers, applications
-from tensorflow.python.keras.layers import Conv2D, MaxPool2D, BatchNormalization, LeakyReLU, Input, Reshape
+from tensorflow.python.keras import models, callbacks, optimizers, regularizers
+from tensorflow.python.keras.layers import Conv2D, MaxPool2D, LeakyReLU, Input, Reshape, Dense, Flatten, Dropout, Activation
 from datetime import datetime
-from keras.regularizers import l2
 from os.path import basename
 import re
-import cv2
 import xml.etree.ElementTree as etree
-import matplotlib.pyplot as plt
-from utils import BBox, draw_bbox, draw_grid, draw_grid_values
 from utils import *
+import argparse
 
-def voc2012_get_annotation(self, path):
-    grid_shape = self.grid_shape
-    classes = self.classes
-    classes_len = len(classes)
-    target_shape = self.target_size
-    bnum = self.anchors_size
-    self.grid_shape = grid_shape
+parser = argparse.ArgumentParser(description='YOLO')
+parser.add_argument('name')
+args = parser.parse_args()
 
-    img = cv2.imread(path)[..., [2, 1, 0]].copy()
+def yolo_loss(y_true, y_pred):
+    # TODO: try this on xy + wh only model
+    # y_true = tf.Print(y_true, [y_true], summarize=1e6, message="\n\n\n\n\n\ny_true->\n")
+    # y_pred = tf.Print(y_pred, [y_pred], summarize=1e6, message="\n\n\n\n\n\ny_pred->\n")
 
-    y = np.zeros(grid_shape + (bnum * 5 + classes_len,), dtype=np.float)
-    grid_nbox = np.zeros(grid_shape, dtype=np.int)  # Count
-    features_path = "VOCdevkit/VOC2012/Annotations/" + re.sub(".jpg", ".xml", basename(path))
-    xml = etree.parse(features_path)
+    # y_true = np.reshape(np.fromfile("y_true2.np", sep=" "), (2, 7, 7, 30))
+    # y_true = tf.to_float(tf.reshape(y_true, (2, 7, 7, 30)))
+    # y_pred = np.reshape(np.fromfile("y_pred2.np", sep=" "), (2, 7, 7, 30))
+    # y_pred = tf.to_float(tf.reshape(y_pred, (2, 7, 7, 30)))
+
+    grid_shape = np.array([7, 7]) # TODO: detect automatically
+    anchors_size = 2 # TODO: detect automatically
+
+    pred_box = tf.stack(tf.split(y_pred[..., 0:anchors_size * 5], num_or_size_splits=anchors_size, axis=3), axis=3)
+    true_box = tf.stack(tf.split(y_true[..., 0:anchors_size * 5], num_or_size_splits=anchors_size, axis=3), axis=3)
+
+    pred_box_xy = pred_box[..., 0:2]
+    pred_box_wh = pred_box[..., 2:4]
+    pred_box_conf = pred_box[..., 4:5]  # tf.sigmoid(
+    pred_class = y_pred[..., (anchors_size * 5):]
+
+    true_box_xy = true_box[..., 0:2]
+    true_box_wh = true_box[..., 2:4]
+    true_box_mask = true_box[..., 4:5]  # tf.sigmoid(
+    true_class = y_true[..., (anchors_size * 5):]
+
+    #################################
+    ### adjust confidence using IoU
+    #################################
+    true_wh_norm = (true_box_wh**2) * grid_shape
+    true_mins = true_box_xy
+    true_maxes = true_box_xy + true_wh_norm
+
+    pred_wh_norm = (pred_box_wh**2) * grid_shape
+    pred_mins = pred_box_xy
+    pred_maxes = pred_box_xy + pred_wh_norm
+
+    # relative to grid_shape
+    intersect_mins = tf.maximum(pred_mins, true_mins)
+    intersect_maxes = tf.minimum(pred_maxes, true_maxes)
+    intersect_wh = tf.maximum(intersect_maxes - intersect_mins, 0.)
+    intersect_areas = intersect_wh[..., 0] * intersect_wh[..., 1]
+    true_areas = true_wh_norm[..., 0] * true_wh_norm[..., 1]
+    pred_areas = pred_wh_norm[..., 0] * pred_wh_norm[..., 1]
+    union_areas = pred_areas + true_areas - intersect_areas + 1e-6
+    iou_scores = tf.truediv(intersect_areas, union_areas)
+
+    true_box_conf = tf.expand_dims(iou_scores, 4) * true_box_mask
+
+    obj_threshold = 0.6
+    true_box_obj = tf.to_float(true_box_mask >= obj_threshold)
+    true_box_noobj = tf.to_float(true_box_mask < obj_threshold)
+    true_cell_obj = tf.reduce_max(true_box_obj, reduction_indices=[3, 4])
+
+
+    loss_xy = true_box_obj * tf.squared_difference(pred_box_xy, true_box_xy)
+    loss_xy = tf.reduce_mean(tf.reduce_sum(loss_xy, reduction_indices=(1, 2, 3, 4)))
+    loss_wh = true_box_obj * tf.squared_difference(pred_box_wh, true_box_wh)
+    loss_wh = tf.reduce_mean(tf.reduce_sum(loss_wh, reduction_indices=(1, 2, 3, 4)))
+    # eval((true_box_obj * true_box_xy)[0, :, :, 0, :])
+    # eval((true_box_obj * pred_box_xy)[0, :, :, 0, :])
+
+    loss_conf = true_box_obj * tf.squared_difference(pred_box_conf, true_box_conf)
+    loss_conf = tf.reduce_mean(tf.reduce_sum(loss_conf, reduction_indices=(1, 2, 3, 4)))
+    # eval((true_box_obj * pred_box_conf)[0,:,:,0,0])
+    # eval((true_box_obj * true_box_conf)[0,:,:,0,0])
+
+    loss_notconf = true_box_noobj * tf.squared_difference(pred_box_conf, true_box_conf)
+    loss_notconf = tf.reduce_mean(tf.reduce_sum(loss_notconf, reduction_indices=(1, 2, 3, 4)))
+    loss_class = tf.squared_difference(pred_class, true_class)
+    loss_class = true_cell_obj * tf.reduce_mean(loss_class, reduction_indices=(3))
+    loss_class = tf.reduce_mean(tf.reduce_sum(loss_class, reduction_indices=(1, 2)))
+    # eval((true_cell_obj*tf.to_float(tf.arg_max(pred_class, 3)))[0,:,:])
+    # eval((true_cell_obj*tf.to_float(tf.arg_max(true_class, 3)))[0,:,:])
+
+    loss = 5.*loss_xy + 5.*loss_wh + loss_class + loss_conf + .5*loss_notconf# 5. * loss_xy + 5. * loss_wh + loss_conf + 0.5 * loss_notconf + loss_class
+
+    # loss = tf.Print(loss, [loss], summarize=1e6, message="\n\n\n\n\n\nloss->\n")
+    return loss
+
+def voc2012_get_annotation(self, img_path):
+    annotations_path = "VOCdevkit/VOC2012/Annotations/" + re.sub(".jpg", ".xml", basename(img_path))
+    xml = etree.parse(annotations_path)
     for node in xml.findall(".//object"):
-        y_class = classes.index(node.find("./name").text)
-
-        # Read information about bounding box and rescale it to target size
-        xmax, xmin, ymax, ymin = [float(el.text) for el in sorted(node.findall("./bndbox/*"), key=lambda el: el.tag)]
+        cl = self.classes.index(node.find("./name").text)
+        xmax, xmin, ymax, ymin = [float(el.text)-1 for el in sorted(node.findall("./bndbox/*"), key=lambda el: el.tag)]
         bb = BBox.from_corners(xmin, xmax, ymin, ymax)
-        bb_cell, bb_rel = position_absolute2grid(img, grid_shape, (bb.y, bb.x))
-
-        # Check whether this grid cell is already full
-        cell_nbox = grid_nbox[bb_cell[0], bb_cell[1]]
-        if cell_nbox >= bnum:
-            continue
-
-        y[bb_cell[0], bb_cell[1], (cell_nbox * 5):(cell_nbox * 5 + 2)] = bb_rel
-        y[bb_cell[0], bb_cell[1], (cell_nbox * 5 + 2):(cell_nbox * 5 + 4)] = [bb.h / img.shape[0], bb.w / img.shape[1]]
-        y[bb_cell[0], bb_cell[1], (cell_nbox * 5 + 4)] = 1.
-        y[bb_cell[0], bb_cell[1], 5 * bnum + y_class] = 1.
-        grid_nbox[bb_cell[0], bb_cell[1]] += 1
-
-        #print(bb_cell, bb_rel, [bb.h / img.shape[0], bb.w / img.shape[1]], (bb.y, bb.x, bb.h, bb.w))
-
-    x = cv2.resize(img, dsize=target_shape) / 255.
-    return x, y
+        yield cl, bb
 
 
-
+enable_profiler = False
 epochs = 600
-batch_size = 64
+batch_size = 2
 grid_shape = (7, 7)
-anchors_size=64
+nbox=2
 l2_weights = 1e-4
 input_shape = (448, 448, 3)
-anchors =  [1.3221, 1.73145, 3.19275, 4.00944, 5.05587, 8.09892, 9.47112, 4.84053, 11.2364, 10.0071]
 classes = ["aeroplane",	"bicycle", "bird", "boat", "bottle", "bus",	"car", "cat", "chair", "cow", "diningtable", "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"]
 
 #
 # Feature extractor model
 #
 input = Input(shape=input_shape)
-x = Conv2D(16, kernel_size=(3, 3), strides=(1, 1), activation='relu', input_shape=input_shape, kernel_regularizer=l2(l2_weights), padding="SAME")(input)
+x = Conv2D(16, kernel_size=(3, 3), strides=(1, 1), input_shape=input_shape, padding="SAME")(input)
+x = LeakyReLU(alpha=0.1)(x)
 x = MaxPool2D(pool_size=(2, 2), strides=(2, 2), padding="SAME")(x)
-for cnn_depth in range(1,6):
-    x = Conv2D(16*(2**cnn_depth), kernel_size=(3, 3), strides=(1, 1), kernel_regularizer=l2(l2_weights), padding="SAME")(x)
-    x = BatchNormalization()(x)
+
+for fnum in [32,64,128,256]:
+    x = Conv2D(fnum, kernel_size=(3, 3), strides=(1, 1), padding="SAME")(x)
     x = LeakyReLU(alpha=0.1)(x)
     x = MaxPool2D(pool_size=(2, 2), strides=(2, 2), padding="SAME")(x)
+    #x = Dropout(0.1)(x)
+x = MaxPool2D(pool_size=(2, 2), strides=(2, 2), padding="SAME")(x)
 
-x = Conv2D(16*(2**cnn_depth), kernel_size=(3, 3), strides=(1, 1), activation='relu', kernel_regularizer=l2(l2_weights), padding="SAME")(x)
-x = Conv2D((anchors_size*5) + len(classes), kernel_size=(1, 1), strides=(1, 1), activation='softmax', kernel_regularizer=l2(l2_weights), padding="SAME")(x)
+for fnum in [128,64,32]:
+    x = Conv2D(fnum, kernel_size=(1, 1), strides=(1, 1), padding="SAME")(x)
+    x = LeakyReLU(alpha=0.1)(x)
+
+x = Flatten()(x)
+x = Dense(4096, kernel_regularizer=regularizers.l2(l2_weights))(x)
+x = LeakyReLU(alpha=0.1)(x)
+#x = Dropout(0.5)(x)
+
+x = Dense(grid_shape[0]*grid_shape[1]*(len(classes) + nbox * 5))(x)
+x = LeakyReLU(alpha=0.1)(x) # TODO: Activation("linear")
+#x = Dropout(0.5)(x)
+
+x = Reshape((grid_shape[0], grid_shape[1], len(classes) + nbox * 5))(x)
+
+
 model = models.Model(inputs=input, outputs=x)
+model.load_weights("K_YOLO/01-10__17-47-04_loss_40_215_215/model-0599.hdf5")
+#for layer in model.layers[0:-4]:
+#    layer.trainable = False
 
-model.compile(loss=yolo_loss,
-              optimizer=optimizers.Adam(lr=1e-3),
-              metrics=[])
+optimizer = optimizers.Adam(lr=1e-3)
+model.compile(loss=yolo_loss, optimizer=optimizer) # , metrics=[current_learning_rate(optimizer)]
+model.summary()
+#model.save("yolo_model.hdf5")
+#exit()
 
-test_items = glob("VOCdevkit/VOC2012/JPEGImages/*.jpg")
-train_items = glob("VOCdevkit/VOC2012/JPEGImages/*.jpg")
-test_generator = YoloImageGenerator(classes=classes, target_size=input_shape[0:2], grid_shape=grid_shape, anchors_size=anchors_size)
-train_generator = YoloImageGenerator(classes=classes, target_size=input_shape[0:2], grid_shape=grid_shape, anchors_size=anchors_size)
-test_iterator = test_generator.flow_from_directory("VOCdevkit/VOC2012/JPEGImages/*.jpg", callback=voc2012_get_annotation, batch_size=batch_size)
-train_iterator = train_generator.flow_from_directory("VOCdevkit/VOC2012/JPEGImages/*.jpg", callback=voc2012_get_annotation, batch_size=batch_size)
+all_images = glob("VOCdevkit/VOC2012/JPEGImages/*.jpg")
+train_items = all_images[0:12000]
+test_items = all_images[12000:len(all_images)]
+data_generator = YoloImageGenerator(classes=classes, target_size=input_shape[0:2], grid_shape=grid_shape, nbox=nbox)
+train_iterator = data_generator.flow_from_list(train_items, annotation_callback=voc2012_get_annotation, batch_size=batch_size)
+test_iterator = data_generator.flow_from_list(test_items, annotation_callback=voc2012_get_annotation, batch_size=batch_size, augument=False)
+
+#exit()
 
 ##############################
 # Train model
 ##############################
-log_dir = "./K_YOLO/{}".format(datetime.today().strftime('%m-%d__%H-%M-%S'))
+log_dir = "./K_YOLO/{}".format(datetime.today().strftime('%m-%d__%H-%M-%S') + "_" + args.name)
 tensorboard = callbacks.TensorBoard(log_dir=log_dir, write_graph=True, write_grads=False, write_images=False, histogram_freq=0)
 tensorboard.set_model(model)
-checkpoint = callbacks.ModelCheckpoint(log_dir + "model-{epoch:04d}.hdf5", period=50)
-reduce_lr = callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=1e-6)
+checkpoint = callbacks.ModelCheckpoint(log_dir + "/model-{epoch:04d}.hdf5", period=1)
+terminate = callbacks.TerminateOnNaN()
+
+def step_decay(epoch):
+    initial_lr = 1e-4
+    drop = 0.5
+    lrate = initial_lr * 1/(1 + drop * epoch)
+    return lrate
+
+
+lr_schedule = callbacks.LearningRateScheduler(step_decay)
+
 model.fit_generator(
     generator=train_iterator,
     epochs=epochs,
     validation_data=test_iterator,
     validation_steps=len(test_items) // batch_size,
-    callbacks=[tensorboard, checkpoint, reduce_lr],
-    steps_per_epoch=len(train_items) // batch_size,
+    callbacks=[checkpoint, lr_schedule], # tensorboard
+    steps_per_epoch=len(train_items) // batch_size, #
     verbose=True)
 
-model.save('yolo.h5')
