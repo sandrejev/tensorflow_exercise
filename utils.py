@@ -9,6 +9,7 @@ from collections import defaultdict
 from imgaug import augmenters as iaa
 import imgaug as ia
 import matplotlib.pyplot as plt
+import os
 
 
 class BBox(object):
@@ -53,19 +54,6 @@ class BBox(object):
     def ymax(self):
         return self.y + self.h / 2.
 
-    def resize(self, scaler):
-        self.x *= scaler[1]
-        self.y *= scaler[0]
-        self.w *= scaler[1]
-        self.h *= scaler[0]
-    #
-    # def grid_position(self, img_size, grid_shape):
-    #     cell_shape = tuple(s[1] / float(s[0]) for s in zip(grid_shape, img_size))
-    #     grid_coords = tuple(sum(self.center[i] > np.linspace(-1e-10, img_size[i], num=grid_shape[i]+1))-1 for i in range(2))
-    #     within_grid_coords = tuple((bb - (g+0.5)*c)/c for bb,g,c in zip(self.center, grid_coords, cell_shape))
-    #
-    #     return grid_coords, within_grid_coords
-
     def as_list(self):
         return [self.x, self.y, self.w, self.h]
 
@@ -84,16 +72,19 @@ class YoloImageGenerator(object):
         self.target_size = target_size
         self.nbox = nbox
         self.grid_shape = grid_shape
+
         self.augmentation_pipeline = iaa.Sequential([
             iaa.Fliplr(0.5),  # horizontally flip 50% of the images
             iaa.Sometimes(0.9,
                 iaa.Sequential([
-                    iaa.Sometimes(0.5, iaa.Affine(translate_px={"x": (-100, 100), "y": (-100, 100)})),
-                    iaa.Sometimes(0.5, iaa.Affine(scale={"x": (0.75, 1.2), "y": (0.75, 1.2)})),
-                    iaa.Sometimes(0.8, iaa.Affine(rotate=(-5., 5), scale=1.2)),
-                    iaa.Crop(px=(int(self.target_size[0]*0.1), int(self.target_size[1]*0.1), int(self.target_size[0]*0.1), int(self.target_size[1]*0.1))),
+                    iaa.SomeOf(2, [
+                        iaa.Sometimes(0.5, iaa.Affine(translate_px={"x": (-100, 100), "y": (-100, 100)})),
+                        iaa.Sometimes(0.5, iaa.Affine(scale=(0.954, 1.25), )),
+                        iaa.Sometimes(0.8, iaa.Affine(rotate=(-5., 5), scale=1.2)),
+                        iaa.Crop(percent=(0, 0.25))
+                    ]),
                     iaa.ElasticTransformation(alpha=(0, 0.2)),
-                    iaa.Add((-100,100))
+                    iaa.Multiply((0.6, 1.5))
                 ])
             ),
             iaa.Scale({"height":self.target_size[0], "width":self.target_size[1]})
@@ -109,8 +100,10 @@ class YoloImageGenerator(object):
         for cl, bb in objects:
             bb_cell, bb_rel = position_absolute2grid(img_shape, self.grid_shape, (bb.y, bb.x))
             bb_size = np.array([bb.h, bb.w]) / img_shape
-            assert bb.xmin >= 0 and bb.ymin >= 0 and bb.xmax < self.target_size[1] and bb.ymax < self.target_size[0]
-            assert bb_cell[0] >= 0 and bb_cell[1] >= 0 and bb_cell[0] < self.grid_shape[0] and bb_cell[1] < self.grid_shape[1]
+            assert bb.xmin >= 0
+            assert bb.ymin >= 0
+            assert bb.xmax < img_shape[1]
+            assert bb.ymax < img_shape[0]
 
             #print(bb_cell, bb_rel)
             y[bb_cell[0], bb_cell[1], 5 * self.nbox + cl] = 1.
@@ -139,16 +132,20 @@ class YoloImageGenerator(object):
                 batch_index = 0
             total_batches_seen += 1
 
-            batch_augmentation_pipeline = self.augmentation_pipeline.to_deterministic()
 
             batch_images_paths = images[current_index:current_index + current_batch_size]
             batch_y = np.zeros((current_batch_size,) + (self.grid_shape + (5*self.nbox + len(self.classes),)), dtype=K.floatx())
             batch_x = np.zeros((current_batch_size,) + self.target_size + (3,), dtype=K.floatx())
             for img_i, image_path in enumerate(batch_images_paths):
+                #ia.seed(np.random.randint(0, np.iinfo(np.int32).max, dtype=np.int32))
                 img = cv2.imread(image_path)[..., [2, 1, 0]].copy()
                 img_shape = np.array(img.shape[:2])
                 img_annotations = list(annotation_callback(self, image_path))
-                img_preprocessing = batch_augmentation_pipeline if augument else self.scale_pipeline
+                if augument:
+                    img_preprocessing = self.augmentation_pipeline
+                else:
+                    img_preprocessing = self.scale_pipeline
+                img_preprocessing = img_preprocessing.to_deterministic()
 
                 img_bboxes = []
                 for cl, bb in img_annotations:
@@ -164,19 +161,23 @@ class YoloImageGenerator(object):
                     bb = BBox.from_corners(xmin=bb_aug.x1, xmax=bb_aug.x2, ymin=bb_aug.y1, ymax=bb_aug.y2, clip_shape=self.target_size)
                     aug_annotations.append((cl, bb))
 
-                batch_x[img_i] = batch_augmentation_pipeline.augment_image(img) / 255.
-                batch_y[img_i] = self.generate_yolo_grid(self.target_size, aug_annotations)
+                img_aug = img_preprocessing.augment_image(img)
+                y_aug = self.generate_yolo_grid(self.target_size, aug_annotations)
+                #y_orig = self.generate_yolo_grid(img_shape, img_annotations)
 
-
-                # draw_predicted_boxes(img, self.generate_yolo_grid(img_shape, img_annotations), self.classes, conf_threshold = 0.5)
+                # draw_predicted_boxes(img, y_orig, self.classes, conf_threshold = 0.5)
                 # plt.imshow(img)
-                # plt.show()
+                # plt.savefig("test/imgorig_" + os.path.basename(image_path))
+                # plt.close()
                 #
-                # draw_predicted_boxes(batch_x[img_i], batch_y[img_i], self.classes, conf_threshold = 0.5)
-                # plt.imshow(batch_x[img_i].astype(np.uint8))
+                # draw_predicted_boxes(img_aug, y_aug, self.classes, conf_threshold = 0.5)
+                # plt.imshow(img_aug.astype(np.uint8))
+                # plt.savefig("test/imgaug_" + os.path.basename(image_path))
                 # plt.show()
                 # x = "test"
 
+                batch_x[img_i] = img_aug / 255.
+                batch_y[img_i] = y_aug
                 #print("batch {}: {}".format(batch_index, np.sum(batch_y)))
 
             #pickle.dump((batch_x, batch_y), open("nan.pickle", "wb"))

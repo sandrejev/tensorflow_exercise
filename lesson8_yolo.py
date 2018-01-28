@@ -6,6 +6,7 @@ from os.path import basename
 import re
 import xml.etree.ElementTree as etree
 from utils import *
+from clr_callback import CyclicLR
 import argparse
 
 parser = argparse.ArgumentParser(description='YOLO')
@@ -95,61 +96,67 @@ def yolo_loss(y_true, y_pred):
 def voc2012_get_annotation(self, img_path):
     annotations_path = "VOCdevkit/VOC2012/Annotations/" + re.sub(".jpg", ".xml", basename(img_path))
     xml = etree.parse(annotations_path)
+    height = float(xml.find(".//size/height").text)
+    width = float(xml.find(".//size/width").text)
     for node in xml.findall(".//object"):
         cl = self.classes.index(node.find("./name").text)
-        xmax, xmin, ymax, ymin = [float(el.text)-1 for el in sorted(node.findall("./bndbox/*"), key=lambda el: el.tag)]
-        bb = BBox.from_corners(xmin, xmax, ymin, ymax)
+        p = {el.tag: float(el.text)-1 for el in node.findall("./bndbox/*")}
+        bb = BBox.from_corners(xmin=p['xmin'], xmax=p['xmax'], ymin=p['ymin'], ymax=p['ymax'], clip_shape=(height, width))
         yield cl, bb
 
 
 enable_profiler = False
 epochs = 600
-batch_size = 2
+batch_size = 64
 grid_shape = (7, 7)
 nbox=2
 l2_weights = 1e-4
 input_shape = (448, 448, 3)
-classes = ["aeroplane",	"bicycle", "bird", "boat", "bottle", "bus",	"car", "cat", "chair", "cow", "diningtable", "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"]
+classes = ["aeroplane",	"bicycle", "bird", "boat", "bottle",
+           "bus",	"car", "cat", "chair", "cow", "diningtable",
+           "dog", "horse", "motorbike", "person", "pottedplant",
+           "sheep", "sofa", "train", "tvmonitor"]
 
 #
 # Feature extractor model
 #
 input = Input(shape=input_shape)
-x = Conv2D(16, kernel_size=(3, 3), strides=(1, 1), input_shape=input_shape, padding="SAME")(input)
-x = LeakyReLU(alpha=0.1)(x)
+x = Conv2D(16, kernel_size=(3, 3), strides=(1, 1), input_shape=input_shape, padding="SAME", activation="relu")(input)
+#x = LeakyReLU(alpha=0.1)(x)
 x = MaxPool2D(pool_size=(2, 2), strides=(2, 2), padding="SAME")(x)
 
 for fnum in [32,64,128,256]:
-    x = Conv2D(fnum, kernel_size=(3, 3), strides=(1, 1), padding="SAME")(x)
-    x = LeakyReLU(alpha=0.1)(x)
+    x = Conv2D(fnum, kernel_size=(3, 3), strides=(1, 1), padding="SAME", activation="relu")(x)
+    #x = LeakyReLU(alpha=0.1)(x)
     x = MaxPool2D(pool_size=(2, 2), strides=(2, 2), padding="SAME")(x)
     #x = Dropout(0.1)(x)
 x = MaxPool2D(pool_size=(2, 2), strides=(2, 2), padding="SAME")(x)
 
-for fnum in [128,64,32]:
-    x = Conv2D(fnum, kernel_size=(1, 1), strides=(1, 1), padding="SAME")(x)
-    x = LeakyReLU(alpha=0.1)(x)
+for fnum in [128, 256]:
+    x = Conv2D(fnum, kernel_size=(1, 1), strides=(1, 1), padding="SAME", activation="relu")(x)
+    #x = LeakyReLU(alpha=0.1)(x)
 
 x = Flatten()(x)
-x = Dense(4096, kernel_regularizer=regularizers.l2(l2_weights))(x)
-x = LeakyReLU(alpha=0.1)(x)
+x = Dense(2048, kernel_regularizer=regularizers.l2(l2_weights), activation="relu")(x)
+#x = LeakyReLU(alpha=0.1)(x)
 #x = Dropout(0.5)(x)
 
-x = Dense(grid_shape[0]*grid_shape[1]*(len(classes) + nbox * 5))(x)
-x = LeakyReLU(alpha=0.1)(x) # TODO: Activation("linear")
+x = Dense(grid_shape[0]*grid_shape[1]*(len(classes) + nbox * 5), activation="relu")(x)
+#x = LeakyReLU(alpha=0.1)(x) # TODO: Activation("linear")
 #x = Dropout(0.5)(x)
 
 x = Reshape((grid_shape[0], grid_shape[1], len(classes) + nbox * 5))(x)
 
 
 model = models.Model(inputs=input, outputs=x)
-model.load_weights("K_YOLO/01-10__17-47-04_loss_40_215_215/model-0599.hdf5")
+#model.load_weights("K_YOLO/01-10__17-47-04_loss_40_215_215/model-0599.hdf5")
 #for layer in model.layers[0:-4]:
 #    layer.trainable = False
 
-optimizer = optimizers.Adam(lr=1e-3)
-model.compile(loss=yolo_loss, optimizer=optimizer) # , metrics=[current_learning_rate(optimizer)]
+optimizer = optimizers.Adam(lr=1e-6)
+model.compile(loss=yolo_loss, optimizer=optimizer, metrics=[current_learning_rate(optimizer)])
 model.summary()
+#exit()
 #model.save("yolo_model.hdf5")
 #exit()
 
@@ -157,10 +164,9 @@ all_images = glob("VOCdevkit/VOC2012/JPEGImages/*.jpg")
 train_items = all_images[0:12000]
 test_items = all_images[12000:len(all_images)]
 data_generator = YoloImageGenerator(classes=classes, target_size=input_shape[0:2], grid_shape=grid_shape, nbox=nbox)
-train_iterator = data_generator.flow_from_list(train_items, annotation_callback=voc2012_get_annotation, batch_size=batch_size)
+train_iterator = data_generator.flow_from_list(train_items, annotation_callback=voc2012_get_annotation, batch_size=batch_size, augument=False)
 test_iterator = data_generator.flow_from_list(test_items, annotation_callback=voc2012_get_annotation, batch_size=batch_size, augument=False)
 
-#exit()
 
 ##############################
 # Train model
@@ -173,10 +179,15 @@ terminate = callbacks.TerminateOnNaN()
 
 def step_decay(epoch):
     initial_lr = 1e-4
-    drop = 0.5
+    drop = 0.05
     lrate = initial_lr * 1/(1 + drop * epoch)
     return lrate
 
+def step_increase(epoch): # designed for 0-35
+    initial_lr = 1e-8
+    increase = 0.5
+    lrate = initial_lr * (1 + increase)**epoch
+    return lrate
 
 lr_schedule = callbacks.LearningRateScheduler(step_decay)
 
@@ -185,7 +196,7 @@ model.fit_generator(
     epochs=epochs,
     validation_data=test_iterator,
     validation_steps=len(test_items) // batch_size,
-    callbacks=[checkpoint, lr_schedule], # tensorboard
+    callbacks=[lr_schedule, tensorboard], # checkpoint, tensorboard, lr_schedule,
     steps_per_epoch=len(train_items) // batch_size, #
     verbose=True)
 
